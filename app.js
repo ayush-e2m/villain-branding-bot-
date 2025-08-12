@@ -2,356 +2,197 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const fetch = require('node-fetch'); // For Node <18, else remove if using Node 18+
 
-const SERVICE_OPTIONS = [
-  { text: { type: 'plain_text', text: 'Messaging' }, value: 'Messaging' },
-  { text: { type: 'plain_text', text: 'Advertisement' }, value: 'Advertisement' },
-  { text: { type: 'plain_text', text: 'Naming' }, value: 'Naming' },
-  { text: { type: 'plain_text', text: 'Strategy' }, value: 'Strategy' }, // Added
-  // Add more services here if you need
+/** -----------------------------
+ * Services list (unchanged)
+ * ----------------------------- */
+const SERVICES = ['Messaging', 'Advertisement', 'Naming', 'Strategy'];
+
+const SERVICE_OPTIONS = SERVICES.map(s => ({
+  text: { type: 'plain_text', text: s },
+  value: s,
+}));
+
+/** -----------------------------
+ * Question registry
+ * -----------------------------
+ * Rule: Only "Complexity Level" is per-service unique.
+ * All other questions live once, with `appliesTo` listing services that use it.
+ * `id` must be globally unique across all questions in this registry.
+ * For service-unique questions (complexity), we generate them dynamically.
+ */
+const COMMON_QUESTIONS = [
+  {
+    id: 'client_materials',
+    appliesTo: ['Messaging', 'Naming', 'Strategy'],
+    label: 'How many client materials to review?',
+    type: 'static_select',
+    options: ['3', '5', '10', '15'],
+  },
+  {
+    id: 'competitors_analyze',
+    appliesTo: ['Messaging', 'Naming', 'Strategy'],
+    label: 'How many competitors to analyze?',
+    type: 'static_select',
+    options: ['2', '3', '5', '8'],
+  },
+  {
+    id: 'stakeholders_interview',
+    appliesTo: ['Naming', 'Strategy'],
+    label: 'How many stakeholders to interview?',
+    type: 'static_select',
+    options: ['4', '8', '12', '20'],
+  },
+
+  /** Messaging-only (non-complexity) */
+  {
+    id: 'messaging_strategy_session',
+    appliesTo: ['Messaging'],
+    label: 'Messaging: How long of a strategy work session is required?',
+    type: 'static_select',
+    options: ['60 minutes', '1.5 hours', '4 hours'],
+  },
+  {
+    id: 'messaging_review_rounds',
+    appliesTo: ['Messaging'],
+    label: 'Messaging: How many rounds of review?',
+    type: 'static_select',
+    options: ['None', 'One', 'Two', 'Three'],
+  },
+  {
+    id: 'messaging_immersion_call_duration',
+    appliesTo: ['Messaging'],
+    label: 'What duration would you prefer for the immersion call?',
+    type: 'static_select',
+    options: ['60 mins', '90 mins', '120 mins'],
+  },
+  {
+    id: 'messaging_virtual_strategic_session',
+    appliesTo: ['Messaging'],
+    label: 'How many virtual strategic sessions?',
+    type: 'static_select',
+    options: ['One', 'Two', 'Three'],
+  },
+
+  /** Naming-only (non-complexity) */
+  {
+    id: 'naming_creative_territories',
+    appliesTo: ['Naming'],
+    label: 'Naming: How many unique creative naming territories?',
+    type: 'static_select',
+    options: ['2', '4', '6'],
+  },
+  {
+    id: 'naming_options',
+    appliesTo: ['Naming'],
+    label: 'Naming: How many naming options?',
+    type: 'static_select',
+    options: ['100', '200', '300', '400'],
+  },
+  {
+    id: 'naming_prescreened_candidates',
+    appliesTo: ['Naming'],
+    label: 'Naming: How many pre-screened name candidates?',
+    type: 'static_select',
+    options: ['10', '20', '30'],
+  },
+  {
+    id: 'naming_legal_vetted',
+    appliesTo: ['Naming'],
+    label: 'Naming: How many shortlist name candidates are legally vetted?',
+    type: 'static_select',
+    options: ['3', '6', '8', '10'],
+  },
+  {
+    id: 'naming_shortlist_legal_vetting',
+    appliesTo: ['Naming'],
+    label: 'Naming: How many shortlist name candidates for legal vetting?',
+    type: 'static_select',
+    options: ['30', '50', '70', '100'],
+  },
+
+  /** Advertisement-only (no overlaps) */
+  {
+    id: 'advertisement_platforms',
+    appliesTo: ['Advertisement'],
+    label: 'Advertisement: Platforms',
+    type: 'multi_static_select',
+    options: ['Google Ads', 'Facebook', 'Instagram', 'LinkedIn', 'Other'],
+  },
+  {
+    id: 'advertisement_budget',
+    appliesTo: ['Advertisement'],
+    label: 'Advertisement: What is your budget?',
+    type: 'plain_text_input',
+    placeholder: 'e.g. $5000/month',
+  },
+  {
+    id: 'advertisement_duration',
+    appliesTo: ['Advertisement'],
+    label: 'Advertisement: Campaign Duration (weeks)',
+    type: 'static_select',
+    options: ['2 weeks', '4 weeks', '8 weeks'],
+  },
 ];
 
-const SERVICE_QUESTIONS = {
-  Messaging: [
-    {
-      type: 'input',
-      block_id: 'messaging_complexity_level_block',
-      label: { type: 'plain_text', text: 'Messaging: Complexity Level' },
-      element: {
-        type: 'static_select',
-        action_id: 'complexity_level',
-        options: [
-          { text: { type: 'plain_text', text: 'Light' }, value: 'Light' },
-          { text: { type: 'plain_text', text: 'Medium' }, value: 'Medium' },
-          { text: { type: 'plain_text', text: 'Large' }, value: 'Large' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_client_materials_block',
-      label: { type: 'plain_text', text: 'Messaging: How many client materials to review?' },
-      element: {
-        type: 'static_select',
-        action_id: 'client_materials',
-        options: [
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '10' }, value: '10' },
-          { text: { type: 'plain_text', text: '15' }, value: '15' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_competitors_analyze_block',
-      label: { type: 'plain_text', text: 'Messaging: How many competitors to analyze?' },
-      element: {
-        type: 'static_select',
-        action_id: 'competitors_analyze',
-        options: [
-          { text: { type: 'plain_text', text: '2' }, value: '2' },
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_strategy_session_block',
-      label: { type: 'plain_text', text: 'Messaging: How long of a strategy work session is required?' },
-      element: {
-        type: 'static_select',
-        action_id: 'strategy_session',
-        options: [
-          { text: { type: 'plain_text', text: '60 minutes' }, value: '60 minutes' },
-          { text: { type: 'plain_text', text: '1.5 hours' }, value: '1.5 hours' },
-          { text: { type: 'plain_text', text: '4 hours' }, value: '4 hours' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_review_rounds_block',
-      label: { type: 'plain_text', text: 'Messaging: How many rounds of review?' },
-      element: {
-        type: 'static_select',
-        action_id: 'review_rounds',
-        options: [
-          { text: { type: 'plain_text', text: 'None' }, value: 'None' },
-          { text: { type: 'plain_text', text: 'One' }, value: 'One' },
-          { text: { type: 'plain_text', text: 'Two' }, value: 'Two' },
-          { text: { type: 'plain_text', text: 'Three' }, value: 'Three' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_immersion_call_duration_block',
-      label: { type: 'plain_text', text: 'What duration would you prefer for the immersion call?' },
-      element: {
-        type: 'static_select',
-        action_id: 'immersion_call_duration',
-        options: [
-          { text: { type: 'plain_text', text: '60 mins' }, value: '60 mins' },
-          { text: { type: 'plain_text', text: '90 mins' }, value: '90 mins' },
-          { text: { type: 'plain_text', text: '120 mins' }, value: '120 mins' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'messaging_virtual_strategic_session_block',
-      label: { type: 'plain_text', text: 'How many virtual strategic sessions?' },
-      element: {
-        type: 'static_select',
-        action_id: 'virtual_strategic_session',
-        options: [
-          { text: { type: 'plain_text', text: 'One' }, value: 'One' },
-          { text: { type: 'plain_text', text: 'Two' }, value: 'Two' },
-          { text: { type: 'plain_text', text: 'Three' }, value: 'Three' },
-        ],
-      },
-    },
-  ],
-  Advertisement: [
-    {
-      type: 'input',
-      block_id: 'advertisement_platform_block',
-      label: { type: 'plain_text', text: 'Advertisement: Platforms' },
-      element: {
-        type: 'multi_static_select',
-        action_id: 'platforms',
-        options: [
-          { text: { type: 'plain_text', text: 'Google Ads' }, value: 'Google Ads' },
-          { text: { type: 'plain_text', text: 'Facebook' }, value: 'Facebook' },
-          { text: { type: 'plain_text', text: 'Instagram' }, value: 'Instagram' },
-          { text: { type: 'plain_text', text: 'LinkedIn' }, value: 'LinkedIn' },
-          { text: { type: 'plain_text', text: 'Other' }, value: 'Other' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'advertisement_budget_block',
-      label: { type: 'plain_text', text: 'Advertisement: What is your budget?' },
-      element: {
-        type: 'plain_text_input',
-        action_id: 'budget',
-        placeholder: { type: 'plain_text', text: 'e.g. $5000/month' },
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'advertisement_duration_block',
-      label: { type: 'plain_text', text: 'Advertisement: Campaign Duration (weeks)' },
-      element: {
-        type: 'static_select',
-        action_id: 'duration',
-        options: [
-          { text: { type: 'plain_text', text: '2 weeks' }, value: '2 weeks' },
-          { text: { type: 'plain_text', text: '4 weeks' }, value: '4 weeks' },
-          { text: { type: 'plain_text', text: '8 weeks' }, value: '8 weeks' },
-        ],
-      },
-    },
-  ],
-  Naming: [
-    {
-      type: 'input',
-      block_id: 'naming_client_materials_block',
-      label: { type: 'plain_text', text: 'Naming: How many client materials to review?' },
-      element: {
-        type: 'static_select',
-        action_id: 'client_materials',
-        options: [
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '10' }, value: '10' },
-          { text: { type: 'plain_text', text: '15' }, value: '15' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_stakeholders_interview_block',
-      label: { type: 'plain_text', text: 'Naming: How many stakeholders to interview?' },
-      element: {
-        type: 'static_select',
-        action_id: 'stakeholders_interview',
-        options: [
-          { text: { type: 'plain_text', text: '4' }, value: '4' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-          { text: { type: 'plain_text', text: '12' }, value: '12' },
-          { text: { type: 'plain_text', text: '20' }, value: '20' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_competitors_analyze_block',
-      label: { type: 'plain_text', text: 'Naming: How many competitors to analyze?' },
-      element: {
-        type: 'static_select',
-        action_id: 'competitors_analyze',
-        options: [
-          { text: { type: 'plain_text', text: '2' }, value: '2' },
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_creative_territories_block',
-      label: { type: 'plain_text', text: 'Naming: How many unique creative naming territories?' },
-      element: {
-        type: 'static_select',
-        action_id: 'creative_territories',
-        options: [
-          { text: { type: 'plain_text', text: '2' }, value: '2' },
-          { text: { type: 'plain_text', text: '4' }, value: '4' },
-          { text: { type: 'plain_text', text: '6' }, value: '6' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_options_block',
-      label: { type: 'plain_text', text: 'Naming: How many naming options?' },
-      element: {
-        type: 'static_select',
-        action_id: 'naming_options',
-        options: [
-          { text: { type: 'plain_text', text: '100' }, value: '100' },
-          { text: { type: 'plain_text', text: '200' }, value: '200' },
-          { text: { type: 'plain_text', text: '300' }, value: '300' },
-          { text: { type: 'plain_text', text: '400' }, value: '400' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_prescreened_candidates_block',
-      label: { type: 'plain_text', text: 'Naming: How many pre-screened name candidates?' },
-      element: {
-        type: 'static_select',
-        action_id: 'prescreened_candidates',
-        options: [
-          { text: { type: 'plain_text', text: '10' }, value: '10' },
-          { text: { type: 'plain_text', text: '20' }, value: '20' },
-          { text: { type: 'plain_text', text: '30' }, value: '30' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_legal_vetted_block',
-      label: { type: 'plain_text', text: 'Naming: How many shortlist name candidates are legally vetted?' },
-      element: {
-        type: 'static_select',
-        action_id: 'legal_vetted',
-        options: [
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '6' }, value: '6' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-          { text: { type: 'plain_text', text: '10' }, value: '10' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_complexity_level_block',
-      label: { type: 'plain_text', text: 'Naming: Complexity Level' },
-      element: {
-        type: 'static_select',
-        action_id: 'complexity_level',
-        options: [
-          { text: { type: 'plain_text', text: 'Light' }, value: 'Light' },
-          { text: { type: 'plain_text', text: 'Medium' }, value: 'Medium' },
-          { text: { type: 'plain_text', text: 'Large' }, value: 'Large' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'naming_shortlist_legal_vetting_block',
-      label: { type: 'plain_text', text: 'Naming: How many shortlist name candidates for legal vetting?' },
-      element: {
-        type: 'static_select',
-        action_id: 'shortlist_legal_vetting',
-        options: [
-          { text: { type: 'plain_text', text: '30' }, value: '30' },
-          { text: { type: 'plain_text', text: '50' }, value: '50' },
-          { text: { type: 'plain_text', text: '70' }, value: '70' },
-          { text: { type: 'plain_text', text: '100' }, value: '100' },
-        ],
-      },
-    },
-  ],
-  Strategy: [
-    {
-      type: 'input',
-      block_id: 'strategy_complexity_level_block',
-      label: { type: 'plain_text', text: 'Complexity Level' },
-      element: {
-        type: 'static_select',
-        action_id: 'complexity_level',
-        options: [
-          { text: { type: 'plain_text', text: 'Light' }, value: 'Light' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'strategy_client_materials_block',
-      label: { type: 'plain_text', text: 'How many client materials to review?' },
-      element: {
-        type: 'static_select',
-        action_id: 'client_materials',
-        options: [
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '10' }, value: '10' },
-          { text: { type: 'plain_text', text: '15' }, value: '15' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'strategy_competitors_analyze_block',
-      label: { type: 'plain_text', text: 'How many competitors to analyze?' },
-      element: {
-        type: 'static_select',
-        action_id: 'competitors_analyze',
-        options: [
-          { text: { type: 'plain_text', text: '2' }, value: '2' },
-          { text: { type: 'plain_text', text: '3' }, value: '3' },
-          { text: { type: 'plain_text', text: '5' }, value: '5' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'strategy_stakeholders_interview_block',
-      label: { type: 'plain_text', text: 'How many stakeholders to interview?' },
-      element: {
-        type: 'static_select',
-        action_id: 'stakeholders_interview',
-        options: [
-          { text: { type: 'plain_text', text: '4' }, value: '4' },
-          { text: { type: 'plain_text', text: '8' }, value: '8' },
-          { text: { type: 'plain_text', text: '12' }, value: '12' },
-          { text: { type: 'plain_text', text: '20' }, value: '20' },
-        ],
-      },
-    },
-  ],
-  // ...other services...
-};
+/** Build a Slack block for a single question descriptor */
+function buildBlockFromQuestion(q) {
+  const block_id = `${q.id}_block`;
 
+  // element (by type)
+  let element;
+  if (q.type === 'static_select') {
+    element = {
+      type: 'static_select',
+      action_id: q.id,
+      options: q.options.map(o => ({ text: { type: 'plain_text', text: o }, value: o })),
+      placeholder: { type: 'plain_text', text: 'Select…' },
+    };
+  } else if (q.type === 'multi_static_select') {
+    element = {
+      type: 'multi_static_select',
+      action_id: q.id,
+      options: q.options.map(o => ({ text: { type: 'plain_text', text: o }, value: o })),
+      placeholder: { type: 'plain_text', text: 'Select one or more…' },
+    };
+  } else if (q.type === 'plain_text_input') {
+    element = {
+      type: 'plain_text_input',
+      action_id: q.id,
+      placeholder: q.placeholder ? { type: 'plain_text', text: q.placeholder } : undefined,
+    };
+  } else {
+    throw new Error(`Unsupported question type: ${q.type}`);
+  }
+
+  return {
+    type: 'input',
+    block_id,
+    label: { type: 'plain_text', text: q.label },
+    element,
+  };
+}
+
+/** Build the unique complexity block for a given service */
+function buildComplexityBlock(service) {
+  return {
+    type: 'input',
+    block_id: `${service.toLowerCase()}_complexity_level_block`,
+    label: { type: 'plain_text', text: `${service}: Complexity Level` },
+    element: {
+      type: 'static_select',
+      action_id: 'complexity_level',
+      options: [
+        { text: { type: 'plain_text', text: 'Light' }, value: 'Light' },
+        { text: { type: 'plain_text', text: 'Medium' }, value: 'Medium' },
+        { text: { type: 'plain_text', text: 'Large' }, value: 'Large' },
+      ],
+    },
+  };
+}
+
+/** -----------------------------
+ * Slack app
+ * ----------------------------- */
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -371,10 +212,7 @@ app.command('/service', async ({ ack, body, client }) => {
         submit: { type: 'plain_text', text: 'Next' },
         close: { type: 'plain_text', text: 'Cancel' },
         blocks: [
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: 'Submitting Details' },
-          },
+          { type: 'header', text: { type: 'plain_text', text: 'Submitting Details' } },
           {
             type: 'input',
             block_id: 'company_name_block',
@@ -423,14 +261,14 @@ app.command('/service', async ({ ack, body, client }) => {
   }
 });
 
-app.view('service_intro_modal', async ({ ack, view, body, client }) => {
+app.view('service_intro_modal', async ({ ack, view, client }) => {
   const values = view.state.values;
   const companyName = values.company_name_block.company_name.value;
   const projectName = values.project_name_block.project_name.value;
   const date = values.date_block.date.selected_date;
-  const selectedServices = values.services_block.services.selected_options.map(opt => opt.value);
+  const selectedServices =
+    values.services_block.services.selected_options.map(opt => opt.value);
 
-  // Validation
   if (!companyName || !projectName || !date || selectedServices.length === 0) {
     await ack({
       response_action: 'errors',
@@ -444,13 +282,34 @@ app.view('service_intro_modal', async ({ ack, view, body, client }) => {
     return;
   }
 
-  // Prepare service questions
-  let serviceBlocks = [];
-  selectedServices.forEach(service => {
-    if (SERVICE_QUESTIONS[service]) {
-      serviceBlocks = serviceBlocks.concat(SERVICE_QUESTIONS[service]);
-    }
+  // Build blocks:
+  // 1) Per-service complexity (unique)
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Company:* ${companyName}\n*Project:* ${projectName}\n*Date:* ${date}\n*Services:* ${selectedServices.join(', ')}`,
+      },
+    },
+  ];
+
+  selectedServices.forEach(svc => {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'header', text: { type: 'plain_text', text: `${svc} · Complexity` } });
+    blocks.push(buildComplexityBlock(svc));
   });
+
+  // 2) Shared/common questions: include each question ONCE if it applies to any selected service
+  const visibleCommon = COMMON_QUESTIONS.filter(q =>
+    q.appliesTo.some(svc => selectedServices.includes(svc))
+  );
+
+  if (visibleCommon.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'header', text: { type: 'plain_text', text: 'Shared Questions' } });
+    visibleCommon.forEach(q => blocks.push(buildBlockFromQuestion(q)));
+  }
 
   await ack({
     response_action: 'update',
@@ -460,19 +319,8 @@ app.view('service_intro_modal', async ({ ack, view, body, client }) => {
       title: { type: 'plain_text', text: 'Service Details' },
       submit: { type: 'plain_text', text: 'Submit' },
       close: { type: 'plain_text', text: 'Cancel' },
-      private_metadata: JSON.stringify({
-        companyName,
-        projectName,
-        date,
-        selectedServices,
-      }),
-      blocks: [
-        {
-          type: 'section',
-          text: { type: 'plain_text', text: `Company: ${companyName}\nProject: ${projectName}\nDate: ${date}\nServices: ${selectedServices.join(', ')}` },
-        },
-        ...serviceBlocks,
-      ],
+      private_metadata: JSON.stringify({ companyName, projectName, date, selectedServices }),
+      blocks,
     },
   });
 });
@@ -483,7 +331,7 @@ app.view('service_details_modal', async ({ ack, view, body }) => {
   const { companyName, projectName, date, selectedServices } = JSON.parse(view.private_metadata || '{}');
   const values = view.state.values;
 
-  let result = {
+  const result = {
     user: body.user.id,
     company_name: companyName,
     project_name: projectName,
@@ -492,27 +340,43 @@ app.view('service_details_modal', async ({ ack, view, body }) => {
     service_details: {},
   };
 
+  // 1) Read per-service complexity answers
   selectedServices.forEach(service => {
-    result.service_details[service] = {};
-    (SERVICE_QUESTIONS[service] || []).forEach(block => {
-      const block_id = block.block_id;
-      const element = block.element;
-      let answer;
-      try {
-        if (element.type === 'static_select') {
-          answer = values[block_id][element.action_id]?.selected_option?.value;
-        } else if (element.type === 'multi_static_select') {
-          answer = (values[block_id][element.action_id]?.selected_options || []).map(opt => opt.value);
-        } else if (element.type === 'plain_text_input') {
-          answer = values[block_id][element.action_id]?.value;
-        } else if (element.type === 'datepicker') {
-          answer = values[block_id][element.action_id]?.selected_date;
-        }
-      } catch (e) {}
-      result.service_details[service][block_id] = answer;
+    const blockId = `${service.toLowerCase()}_complexity_level_block`;
+    const complexity =
+      values[blockId]?.complexity_level?.selected_option?.value || null;
+
+    result.service_details[service] = {
+      complexity_level: complexity,
+    };
+  });
+
+  // 2) Read each visible shared question ONCE and fan out to all services that use it
+  COMMON_QUESTIONS.forEach(q => {
+    // Was this question shown? (block present?)
+    const blockId = `${q.id}_block`;
+    if (!values[blockId]) return; // not shown due to service selection
+
+    let answer;
+    const el = values[blockId][q.id];
+
+    if (q.type === 'static_select') {
+      answer = el?.selected_option?.value || null;
+    } else if (q.type === 'multi_static_select') {
+      answer = (el?.selected_options || []).map(o => o.value);
+    } else if (q.type === 'plain_text_input') {
+      answer = el?.value || null;
+    }
+
+    // Assign to every selected service that this question applies to
+    selectedServices.forEach(svc => {
+      if (!q.appliesTo.includes(svc)) return;
+      if (!result.service_details[svc]) result.service_details[svc] = {};
+      result.service_details[svc][q.id] = answer;
     });
   });
 
+  // Send to your webhook (unchanged)
   try {
     const response = await fetch('https://n8n.sitepreviews.dev/webhook/add35f32-af0c-446f-a202-7a7db367e193', {
       method: 'POST',
